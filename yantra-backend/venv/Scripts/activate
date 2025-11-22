@@ -38,7 +38,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="C:\Users\Dell\OneDrive\Desktop\yantra-chatbot\yantra-backend\venv"
+VIRTUAL_ENV="C:\Users\sachi\YC\yantra-chatbot\yantra-backend\venv"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"
