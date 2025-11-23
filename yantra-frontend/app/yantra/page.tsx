@@ -1,11 +1,6 @@
 "use client";
 
-import React, {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -16,18 +11,19 @@ interface Message {
   role: Role;
   content: string;
   timestamp: string;
+  brochure_url?: string | null;
 }
 
 interface ChatApiResponse {
   answer: string;
   used_context: string[];
   from_fallback: boolean;
+  brochure_url?: string | null;
 }
 
 type Theme = "dark" | "light";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
 const SUGGESTED_QUESTIONS: string[] = [
   "What is the chisel diameter for Hyundai R30?",
@@ -68,6 +64,9 @@ export default function YantraChatPage() {
   const [theme, setTheme] = useState<Theme>("dark");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
+  // modal state for brochure preview
+  const [brochureModalUrl, setBrochureModalUrl] = useState<string | null>(null);
+
   // refs to control scrolling
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -83,6 +82,32 @@ export default function YantraChatPage() {
       setTheme(stored);
     }
   }, []);
+
+  // restore chat history on mount
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem("yantra_chat_messages_v1");
+      if (raw) {
+        const parsed = JSON.parse(raw) as Message[];
+        if (Array.isArray(parsed)) {
+          setMessages(parsed);
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to restore messages", e);
+    }
+  }, []);
+
+  // persist messages to localStorage whenever messages change
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("yantra_chat_messages_v1", JSON.stringify(messages));
+    } catch (e) {
+      console.warn("Failed to save messages", e);
+    }
+  }, [messages]);
 
   // scroll to bottom whenever messages change
   useEffect(() => {
@@ -118,6 +143,11 @@ export default function YantraChatPage() {
     setMessages([]);
     setInput("");
     textareaRef.current?.focus();
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem("yantra_chat_messages_v1");
+      }
+    } catch {}
   };
 
   const handleCopy = (content: string) => {
@@ -134,7 +164,6 @@ export default function YantraChatPage() {
     const now = formatTime();
     const lc = trimmed.toLowerCase();
 
-    // Only say "You're welcome" when user explicitly thanks
     if (lc.includes("thank you") || lc.includes("thanks")) {
       const userMsg: Message = {
         id: crypto.randomUUID(),
@@ -145,8 +174,7 @@ export default function YantraChatPage() {
       const botMsg: Message = {
         id: crypto.randomUUID(),
         role: "assistant",
-        content:
-          "You're welcome! Anything else I can help you with today?",
+        content: "You're welcome! Anything else I can help you with today?",
         timestamp: formatTime(),
       };
       setMessages((prev) => [...prev, userMsg, botMsg]);
@@ -188,7 +216,6 @@ export default function YantraChatPage() {
 
       const data: ChatApiResponse = await res.json();
 
-      // Append a short "anything else" line to the same answer
       const followup = randomFrom(FOLLOW_UP_LINES);
       const combinedAnswer = `${data.answer.trim()}\n\n_${followup}_`;
 
@@ -197,9 +224,19 @@ export default function YantraChatPage() {
         role: "assistant",
         content: combinedAnswer,
         timestamp: formatTime(),
+        brochure_url: data.brochure_url ?? null,
       };
 
       setMessages((prev) => [...prev, botMsg]);
+
+      // If backend returned brochure_url: open modal automatically (you can change to require click)
+      if (data.brochure_url) {
+        // build absolute URL (backend returns absolute /brochures/view/.. or full URL)
+        const url = data.brochure_url;
+        // open modal with wrapper url (same origin)
+        setTimeout(() => setBrochureModalUrl(url), 300);
+      }
+
       textareaRef.current?.focus();
     } catch (err: any) {
       console.error(err);
@@ -223,7 +260,6 @@ export default function YantraChatPage() {
 
   const handleQuickQuestion = (q: string) => {
     if (loading) return;
-    // set input so user can edit quickly, but immediately send and focus
     setInput("");
     void sendMessage(q);
   };
@@ -244,262 +280,133 @@ export default function YantraChatPage() {
       ? "min-h-screen flex flex-col bg-slate-950 text-slate-100"
       : "min-h-screen flex flex-col bg-slate-50 text-slate-900";
 
-  const headerBorder =
-    theme === "dark" ? "border-slate-800" : "border-slate-200";
-
-  const headerBg =
-    theme === "dark"
-      ? "bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950"
-      : "bg-white";
-
-  const headerSubText =
-    theme === "dark" ? "text-slate-400" : "text-slate-500";
-
-  const headerRightText =
-    theme === "dark" ? "text-slate-500" : "text-slate-500";
-
+  const headerBorder = theme === "dark" ? "border-slate-800" : "border-slate-200";
+  const headerBg = theme === "dark" ? "bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950" : "bg-white";
+  const headerSubText = theme === "dark" ? "text-slate-400" : "text-slate-500";
   const cardClass =
     theme === "dark"
       ? "rounded-2xl border border-slate-800/80 bg-slate-900/60 shadow-[0_20px_60px_rgba(0,0,0,0.6)]"
       : "rounded-2xl border border-slate-200 bg-white shadow-[0_20px_40px_rgba(15,23,42,0.12)]";
-
-  const dividerBorder =
-    theme === "dark" ? "border-slate-800/80" : "border-slate-200";
-
-  const assistantBubbleClass =
-    theme === "dark"
-      ? "bg-slate-800/90 text-slate-100 border border-slate-700/60"
-      : "bg-slate-100 text-slate-900 border border-slate-200";
-
-  const timestampClass =
-    theme === "dark" ? "text-slate-500" : "text-slate-400";
-
-  const inputBorder =
-    theme === "dark" ? "border-slate-800" : "border-slate-300";
-
-  const inputBg =
-    theme === "dark" ? "bg-slate-900/80" : "bg-white";
+  const dividerBorder = theme === "dark" ? "border-slate-800/80" : "border-slate-200";
+  const assistantBubbleClass = theme === "dark" ? "bg-slate-800/90 text-slate-100 border border-slate-700/60" : "bg-slate-100 text-slate-900 border border-slate-200";
+  const timestampClass = theme === "dark" ? "text-slate-500" : "text-slate-400";
+  const inputBorder = theme === "dark" ? "border-slate-800" : "border-slate-300";
+  const inputBg = theme === "dark" ? "bg-slate-900/80" : "bg-white";
 
   return (
     <div className={rootClass}>
       {/* Header */}
-      <header
-        className={`border-b px-4 py-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between ${headerBorder} ${headerBg}`}
-      >
+      <header className={`border-b px-4 py-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between ${headerBorder} ${headerBg}`}>
         <div className="flex flex-col">
-          <h1 className="text-xl font-semibold tracking-tight">
-            YantraBuddy
-          </h1>
-          <p className={`text-xs ${headerSubText}`}>
-            Answers only from your latest rock breaker, spare parts & dealer
-            datasets.
-          </p>
+          <h1 className="text-xl font-semibold tracking-tight">YantraBuddy</h1>
+          <p className={`text-xs ${headerSubText}`}>Your source for everything on rock breakers, spare parts, and dealer insights.</p>
         </div>
 
         <div className="flex items-center gap-3 mt-1 sm:mt-0 text-[11px]">
-          <span className={headerRightText}>
-            Backend: {API_BASE_URL}
-          </span>
-          {/* Theme toggle */}
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="px-2 py-1 rounded-full border border-slate-500/40 bg-slate-900/10 text-xs hover:bg-slate-900/20 transition"
-          >
+          <button type="button" onClick={toggleTheme} className="px-3 py-2 rounded-full border border-slate-500/40 bg-slate-900/10 text-xs hover:bg-slate-900/20 transition">
             {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
           </button>
-          {/* Clear chat */}
-          <button
-            type="button"
-            onClick={handleClearChat}
-            className="px-2 py-1 rounded-full border border-red-500/60 bg-red-500/10 text-xs text-red-400 hover:bg-red-500/20 transition"
-          >
+          <button type="button" onClick={handleClearChat} className="px-3 py-2 rounded-full border border-red-500/60 bg-red-500/10 text-xs text-red-400 hover:bg-red-500/20 transition">
             🧹 Clear
           </button>
         </div>
       </header>
 
-      {/* Main – page height stays stable; chat card has fixed vh height */}
+      {/* Main */}
       <main className="flex-1 flex flex-col max-w-4xl mx-auto w-full p-4">
-        <section
-          className={`${cardClass} w-full flex flex-col h-[82vh]`}
-        >
-          {/* Greeting + quick actions (always visible) */}
+        <section className={`${cardClass} w-full flex flex-col h-[82vh]`}>
+          {/* Greeting + quick actions */}
           <div className={`p-4 border-b ${dividerBorder}`}>
-            <p className="text-sm font-medium">
-              {greeting}, welcome to YantraLive.
-            </p>
-            <p className="text-xs mt-1 text-slate-400">
-              {hasMessages
-                ? "What else would you like to check? You can also try these questions:"
-                : "How can I help you today? Here are some common questions:"}
-            </p>
+            <p className="text-sm font-medium">{greeting}, welcome to YantraLive.</p>
+            <p className="text-xs mt-1 text-slate-400">{hasMessages ? "What else would you like to check? You can also try these questions:" : "How can I help you today? Here are some common questions:"}</p>
 
-            {/* FAQ quick questions */}
             <div className="mt-3 flex flex-wrap gap-2">
               {quickActions.map((q) => (
-                <button
-                  key={q}
-                  type="button"
-                  onClick={() => handleQuickQuestion(q)}
-                  className="text-xs px-3 py-1 rounded-full border border-sky-500/60 bg-sky-900/40 hover:bg-sky-700/60 hover:border-sky-400 transition shadow-sm"
-                >
+                <button key={q} type="button" onClick={() => handleQuickQuestion(q)} className="text-xs px-3 py-1 rounded-full border border-sky-500/60 bg-sky-900/40 hover:bg-sky-700/60 hover:border-sky-400 transition shadow-sm">
                   {q}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Messages area – this is the scrollable part inside the fixed card */}
-          <div
-            ref={messagesContainerRef}
-            className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3"
-          >
+          {/* Messages area */}
+          <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
             {!hasMessages && (
-              <div className="text-lg font-medium text-slate-300 text-center mt-6">
-                Ask anything about breakers, machine compatibility, spare
-                parts, or dealers.
-              </div>
+              <div className="text-lg font-medium text-slate-300 text-center mt-20">Ask anything about breakers, machine compatibility, spare parts, or dealers.</div>
             )}
 
             {messages.map((m) => (
-              <div
-                key={m.id}
-                className={`flex ${
-                  m.role === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div
-                  className={`flex flex-col max-w-[80%] ${
-                    m.role === "user" ? "items-end" : "items-start"
-                  }`}
-                >
-                  <div
-                    className={`rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${
-                      m.role === "user"
-                        ? "bg-sky-600 text-white shadow-md"
-                        : assistantBubbleClass
-                    }`}
-                  >
+              <div key={m.id} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`flex flex-col max-w-[80%] ${m.role === "user" ? "items-end" : "items-start"}`}>
+                  <div className={`rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${m.role === "user" ? "bg-sky-600 text-white shadow-md" : assistantBubbleClass}`}>
                     {m.role === "assistant" ? (
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          table: ({ children }) => (
-                            <div className="overflow-x-auto my-2">
-                              <table className="text-xs border-collapse w-full">
-                                {children}
-                              </table>
-                            </div>
-                          ),
-                          th: (props) => (
-                            <th
-                              {...props}
-                              className="border border-slate-600 px-2 py-1 bg-slate-900 text-left"
-                            />
-                          ),
-                          td: (props) => (
-                            <td
-                              {...props}
-                              className="border border-slate-700 px-2 py-1 align-top"
-                            />
-                          ),
-                          ul: (props) => (
-                            <ul
-                              {...props}
-                              className="list-disc list-inside space-y-1"
-                            />
-                          ),
-                        }}
-                      >
-                        {m.content}
-                      </ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                     ) : (
                       m.content
                     )}
                   </div>
 
-                  {/* Timestamp + tiny actions */}
+                  {/* Timestamp + tiny actions + brochure button if present */}
                   <div className="mt-1 flex items-center justify-between w-full gap-2">
-                    <span
-                      className={`text-[10px] ${timestampClass}`}
-                    >
-                      {m.timestamp}
-                    </span>
+                    <span className={`text-[10px] ${timestampClass}`}>{m.timestamp}</span>
 
-                    {m.role === "assistant" && (
-                      <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                    <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                      {m.role === "assistant" && (
+                        <>
+                          <button type="button" onClick={() => handleCopy(m.content)} className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60" title="Copy reply">📋</button>
+                          <button type="button" className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60" title="Like">👍</button>
+                          <button type="button" className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60" title="Dislike">👎</button>
+                        </>
+                      )}
+                      {/* If this assistant message included a brochure URL, show small link */}
+                      {m.role === "assistant" && (m as any).brochure_url && (
                         <button
                           type="button"
-                          onClick={() => handleCopy(m.content)}
-                          className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60"
-                          title="Copy reply"
+                          onClick={() => setBrochureModalUrl((m as any).brochure_url)}
+                          className="text-[11px] px-2 py-1 rounded-md border border-slate-600/40 bg-slate-800/20 hover:bg-slate-800/30"
                         >
-                          📋
+                          📘 View Brochure
                         </button>
-                        <button
-                          type="button"
-                          className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60"
-                          title="Like"
-                        >
-                          👍
-                        </button>
-                        <button
-                          type="button"
-                          className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60"
-                          title="Dislike"
-                        >
-                          👎
-                        </button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
             ))}
 
-            {/* anchor for scrollIntoView fallback */}
             <div ref={messagesEndRef} />
             {loading && (
               <div className="flex justify-start">
-                <div className="text-xs text-slate-400 px-3 py-2 bg-slate-800 rounded-xl border border-slate-700/60">
-                  Thinking based on the YantraLive datasets…
-                </div>
+                <div className="text-xs text-slate-400 px-3 py-2 bg-slate-800 rounded-xl border border-slate-700/60">Thinking based on the YantraLive datasets…</div>
               </div>
             )}
           </div>
 
           {/* Input */}
-          <form
-            className={`border-t p-3 flex gap-2 rounded-b-2xl flex-shrink-0 ${
-              dividerBorder
-            } ${
-              theme === "dark" ? "bg-slate-950/70" : "bg-slate-50"
-            }`}
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!loading) void handleSend();
-            }}
-          >
-            <textarea
-              ref={textareaRef}
-              className={`flex-1 text-sm rounded-xl border ${inputBorder} ${inputBg} p-2 resize-none outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500`}
-              rows={2}
-              placeholder="Type your question about breakers, machines, spare parts, dealers, pricing..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-            />
-            <button
-              type="submit"
-              disabled={loading || !input.trim()}
-              className="text-sm px-4 py-2 rounded-xl border border-sky-500 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed transition self-end shadow-md"
-            >
-              {loading ? "Sending..." : "Send"}
-            </button>
+          <form className={`border-t p-3 flex gap-2 rounded-b-2xl flex-shrink-0 ${dividerBorder} ${theme === "dark" ? "bg-slate-950/70" : "bg-slate-50"}`} onSubmit={(e) => { e.preventDefault(); if (!loading) void handleSend(); }}>
+            <textarea ref={textareaRef} className={`flex-1 text-sm rounded-xl border ${inputBorder} ${inputBg} p-2 resize-none outline-none focus:ring-1 focus:ring-sky-500 focus:border-sky-500`} rows={1} placeholder="Type your question about breakers, machines, spare parts, dealers, pricing..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} />
+            <button type="submit" disabled={loading || !input.trim()} className="text-sm px-4 py-2 rounded-xl border border-sky-500 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 disabled:cursor-not-allowed transition self-end shadow-md">{loading ? "Sending..." : "Send"}</button>
           </form>
         </section>
       </main>
+
+      {/* Brochure modal */}
+      {brochureModalUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-[90vw] h-[85vh] bg-white rounded-lg overflow-hidden">
+            <div className="flex items-center justify-between p-3 border-b">
+              <div className="text-sm font-medium">Brochure preview</div>
+              <div className="flex items-center gap-2">
+                <a href={brochureModalUrl.replace("/view/", "/raw/")} target="_blank" rel="noopener noreferrer" className="text-sm px-2 py-1 rounded border">Open in new tab</a>
+                <button className="px-3 py-1 rounded bg-slate-200" onClick={() => setBrochureModalUrl(null)}>Close</button>
+              </div>
+            </div>
+            <div className="w-full h-full">
+              <iframe key={brochureModalUrl} src={brochureModalUrl} title="Brochure" className="w-full h-full border-0" />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
