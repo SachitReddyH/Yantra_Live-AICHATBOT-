@@ -11,19 +11,21 @@ interface Message {
   role: Role;
   content: string;
   timestamp: string;
-  brochure_url?: string | null;
+  brochure_urls?: string[] | null;
 }
 
 interface ChatApiResponse {
   answer: string;
   used_context: string[];
   from_fallback: boolean;
-  brochure_url?: string | null;
+  brochure_urls?: string[] | null;
 }
 
 type Theme = "dark" | "light";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+
+// Example uploaded image path (for developer/tooling use): /mnt/data/ee9aa334-6c83-4590-9d1e-f83dd8e775d3.png
 
 const SUGGESTED_QUESTIONS: string[] = [
   "What is the chisel diameter for Hyundai R30?",
@@ -56,6 +58,109 @@ function formatTime(date: Date = new Date()): string {
   });
 }
 
+/**
+ * Helper to create a human-friendly label for a brochure URL.
+ * Extracts filename and turns into uppercase model token if possible.
+ */
+function labelFromUrl(url: string): string {
+  try {
+    const parts = url.split("/");
+    const fname = parts[parts.length - 1] || "";
+    const nameNoExt = fname.replace(/\.[^/.]+$/, "");
+    // try to uppercase VJ tokens
+    return nameNoExt.toUpperCase();
+  } catch {
+    return "BROCHURE";
+  }
+}
+
+/**
+ * Simple Markdown table parser (same as previous).
+ */
+function parseMarkdownTable(md: string): { headers: string[]; rows: string[][] } | null {
+  const lines = md
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  let tableStart = -1;
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (lines[i].includes("|") && /^\s*\|?[-:\s|]+?\|?\s*$/.test(lines[i + 1])) {
+      tableStart = i;
+      break;
+    }
+  }
+  if (tableStart === -1) return null;
+
+  const headerLine = lines[tableStart];
+  const separatorLine = lines[tableStart + 1];
+
+  if (!headerLine.includes("|") || !separatorLine.includes("-")) return null;
+
+  const splitRow = (line: string) =>
+    line
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
+
+  const headers = splitRow(headerLine);
+  const rows: string[][] = [];
+
+  for (let i = tableStart + 2; i < lines.length; i++) {
+    if (!lines[i].includes("|")) break;
+    rows.push(splitRow(lines[i]));
+  }
+
+  return { headers, rows };
+}
+
+function ComparisonTable({ headers, rows, theme }: { headers: string[]; rows: string[][]; theme: Theme }) {
+  const isDark = theme === "dark";
+  return (
+    <div
+      className={`rounded-2xl p-4 shadow-xl border ${isDark ? "bg-slate-800/80 border-slate-700" : "bg-white border-slate-200"}`}
+      style={{ overflowX: "auto" }}
+      role="table"
+      aria-label="comparison table"
+    >
+      <table className="min-w-[600px] w-full table-fixed">
+        <thead>
+          <tr>
+            {headers.map((h, idx) => (
+              <th
+                key={idx}
+                className={`text-left align-top py-3 px-4 text-sm font-semibold ${isDark ? "text-slate-200" : "text-slate-700"}`}
+                style={idx === 0 ? { width: "28%" } : { width: `${(72 / Math.max(1, headers.length - 1)).toFixed(0)}%` }}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+
+        <tbody>
+          {rows.map((r, ri) => (
+            <tr key={ri} className={`${ri % 2 === 0 ? (isDark ? "bg-slate-800/60" : "bg-slate-50") : ""}`}>
+              {r.map((cell, ci) => (
+                <td key={ci} className={`py-3 px-4 align-top text-sm ${isDark ? "text-slate-200" : "text-slate-800"}`}>
+                  <div className={ci === 0 ? "text-left" : "text-left"}>
+                    {cell.split("  ").join("\n").split("\\n").join("\n").split("\n").map((line, i) => (
+                      <div key={i} className="leading-tight">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export default function YantraChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -63,9 +168,6 @@ export default function YantraChatPage() {
   const [greeting, setGreeting] = useState("Hello");
   const [theme, setTheme] = useState<Theme>("dark");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-  // modal state for brochure preview
-  const [brochureModalUrl, setBrochureModalUrl] = useState<string | null>(null);
 
   // refs to control scrolling
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -224,18 +326,14 @@ export default function YantraChatPage() {
         role: "assistant",
         content: combinedAnswer,
         timestamp: formatTime(),
-        brochure_url: data.brochure_url ?? null,
+        brochure_urls: data.brochure_urls ?? null,
       };
 
       setMessages((prev) => [...prev, botMsg]);
 
-      // If backend returned brochure_url: open modal automatically (you can change to require click)
-      if (data.brochure_url) {
-        // build absolute URL (backend returns absolute /brochures/view/.. or full URL)
-        const url = data.brochure_url;
-        // open modal with wrapper url (same origin)
-        setTimeout(() => setBrochureModalUrl(url), 300);
-      }
+      // DO NOT auto-open multiple tabs here (safer).
+      // If you want auto-open behavior, change this to open each URL:
+      // data.brochure_urls?.forEach(u => window.open(u, "_blank", "noopener,noreferrer"));
 
       textareaRef.current?.focus();
     } catch (err: any) {
@@ -340,13 +438,19 @@ export default function YantraChatPage() {
                 <div className={`flex flex-col max-w-[80%] ${m.role === "user" ? "items-end" : "items-start"}`}>
                   <div className={`rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap ${m.role === "user" ? "bg-sky-600 text-white shadow-md" : assistantBubbleClass}`}>
                     {m.role === "assistant" ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                      (() => {
+                        const maybeTable = parseMarkdownTable(m.content);
+                        if (maybeTable) {
+                          return <ComparisonTable headers={maybeTable.headers} rows={maybeTable.rows} theme={theme} />;
+                        }
+                        return <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>;
+                      })()
                     ) : (
                       m.content
                     )}
                   </div>
 
-                  {/* Timestamp + tiny actions + brochure button if present */}
+                  {/* Timestamp + tiny actions + brochure buttons (if present) */}
                   <div className="mt-1 flex items-center justify-between w-full gap-2">
                     <span className={`text-[10px] ${timestampClass}`}>{m.timestamp}</span>
 
@@ -358,15 +462,33 @@ export default function YantraChatPage() {
                           <button type="button" className="px-1 py-[1px] rounded-full border border-slate-600/60 hover:bg-slate-800/60" title="Dislike">👎</button>
                         </>
                       )}
-                      {/* If this assistant message included a brochure URL, show small link */}
-                      {m.role === "assistant" && (m as any).brochure_url && (
-                        <button
-                          type="button"
-                          onClick={() => setBrochureModalUrl((m as any).brochure_url)}
-                          className="text-[11px] px-2 py-1 rounded-md border border-slate-600/40 bg-slate-800/20 hover:bg-slate-800/30"
-                        >
-                          📘 View Brochure
-                        </button>
+
+                      {/* If this assistant message included brochure_urls, render one button per brochure */}
+                      {m.role === "assistant" && (m as any).brochure_urls && Array.isArray((m as any).brochure_urls) && (
+                        <div className="flex items-center gap-1">
+                          {((m as any).brochure_urls as string[]).map((u, i) => {
+                            const label = labelFromUrl(u) || `Brochure ${i + 1}`;
+                            return (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={() => {
+                                  try {
+                                    if (typeof window !== "undefined") {
+                                      window.open(u, "_blank", "noopener,noreferrer");
+                                    }
+                                  } catch (e) {
+                                    console.warn("Failed to open brochure", e);
+                                  }
+                                }}
+                                className="text-[11px] px-2 py-1 rounded-md border border-slate-600/40 bg-slate-800/20 hover:bg-slate-800/30"
+                                title={`Open ${label}`}
+                              >
+                                📘 Open Brochure — {label}
+                              </button>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -389,24 +511,6 @@ export default function YantraChatPage() {
           </form>
         </section>
       </main>
-
-      {/* Brochure modal */}
-      {brochureModalUrl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-[90vw] h-[85vh] bg-white rounded-lg overflow-hidden">
-            <div className="flex items-center justify-between p-3 border-b">
-              <div className="text-sm font-medium">Brochure preview</div>
-              <div className="flex items-center gap-2">
-                <a href={brochureModalUrl.replace("/view/", "/raw/")} target="_blank" rel="noopener noreferrer" className="text-sm px-2 py-1 rounded border">Open in new tab</a>
-                <button className="px-3 py-1 rounded bg-slate-200" onClick={() => setBrochureModalUrl(null)}>Close</button>
-              </div>
-            </div>
-            <div className="w-full h-full">
-              <iframe key={brochureModalUrl} src={brochureModalUrl} title="Brochure" className="w-full h-full border-0" />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

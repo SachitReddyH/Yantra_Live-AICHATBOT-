@@ -12,33 +12,29 @@ from dotenv import load_dotenv
 
 import pandas as pd
 import chromadb
-import cohere
-from groq import Groq
+from openai import OpenAI
 
 # ==========================
 # ENVIRONMENT
 # ==========================
 load_dotenv()
 
-COHERE_API_KEY = os.getenv("COHERE_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUPPORT_PHONE = os.getenv("YANTRALIVE_SUPPORT_PHONE", "+91-9876543210")
 SUPPORT_EMAIL = os.getenv("YANTRALIVE_SUPPORT_EMAIL", "support@yantralive.com")
 
-if not COHERE_API_KEY:
-    raise RuntimeError("Missing COHERE_API_KEY in .env")
-if not GROQ_API_KEY:
-    raise RuntimeError("Missing GROQ_API_KEY in .env")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Missing OPENAI_API_KEY in .env")
 
-co = cohere.Client(COHERE_API_KEY)
-groq_client = Groq(api_key=GROQ_API_KEY)
+# create OpenAI client (modern 1.0+ interface)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==========================
 # FASTAPI
 # ==========================
 app = FastAPI(
-    title="YantraLive RAG Chatbot (Cohere + Groq)",
-    version="1.2",
+    title="YantraLive RAG Chatbot (OpenAI + Chroma)",
+    version="1.4",
 )
 
 app.add_middleware(
@@ -51,7 +47,6 @@ app.add_middleware(
 # ==========================
 # Brochure storage
 # ==========================
-# Place PDFs in data/brochures (e.g. data/brochures/vj20.pdf)
 BROCHURE_DIR = os.path.join("data", "brochures")
 os.makedirs(BROCHURE_DIR, exist_ok=True)
 
@@ -98,7 +93,6 @@ def brochure_view(filename: str):
     # raw URL (same origin) - this will be served by /brochures/raw/{filename}
     raw_url = f"/brochures/raw/{safe}"
 
-    # Minimal HTML wrapper. User can open raw URL in new tab; wrapper displays PDF inline.
     html = f"""<!doctype html>
 <html>
 <head>
@@ -120,7 +114,6 @@ def brochure_view(filename: str):
     <a class="open-btn" href="{raw_url}" download>Download</a>
   </div>
   <div class="iframe-wrap" role="document">
-    <!-- object tag lets browser use built-in PDF viewer; same-origin wrapper avoids framing blocks -->
     <object data="{raw_url}" type="application/pdf" aria-label="brochure">
       <p>Your browser does not support inline PDF viewing. <a href="{raw_url}" target="_blank">Open brochure</a></p>
     </object>
@@ -141,7 +134,6 @@ def brochure_raw(filename: str):
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Brochure not found")
 
-    # Content-Disposition inline to encourage rendering (not download)
     headers = {
         "Content-Disposition": f'inline; filename="{safe}"'
     }
@@ -181,66 +173,61 @@ class ChatResponse(BaseModel):
     answer: str
     used_context: List[str]
     from_fallback: bool = False
-    brochure_url: Optional[str] = None
+    brochure_urls: Optional[List[str]] = None  # changed to list
+
 
 # ==========================
-# COHERE EMBEDDINGS + RETRY
+# OpenAI EMBEDDINGS + RETRY (modern client)
 # ==========================
-EMBED_MODEL = "embed-english-v3.0"
+EMBED_MODEL = "text-embedding-3-small"
 EMBED_BATCH_SIZE = 64
 EMBED_BATCH_SLEEP_SECONDS = 1.0
 
 
-def _cohere_embed_with_retry(
+def _openai_embed_with_retry(
     texts: List[str],
-    input_type: str,
-    label: str = "",
     max_retries: int = 5,
+    label: str = "",
 ) -> List[List[float]]:
     for attempt in range(max_retries):
         try:
-            resp = co.embed(
-                texts=texts,
-                model=EMBED_MODEL,
-                input_type=input_type,
-            )
-            return resp.embeddings
+            resp = client.embeddings.create(model=EMBED_MODEL, input=texts)
+            # resp.data is a list of items with .embedding
+            return [item.embedding for item in resp.data]
         except Exception as e:
             msg = str(e).lower()
             if "rate limit" in msg or "429" in msg:
                 wait = 5 * (attempt + 1)
                 print(
-                    f"[COHERE] Rate limited while embedding {label} "
+                    f"[OPENAI] Rate limited while embedding {label} "
                     f"(attempt {attempt + 1}/{max_retries}). Sleeping {wait}s."
                 )
                 time.sleep(wait)
                 continue
 
-            print(f"[COHERE] Non-rate-limit error while embedding {label}: {e}")
+            print(f"[OPENAI] Non-rate-limit error while embedding {label}: {e}")
             raise
 
-    raise RuntimeError(f"Cohere embed retries exceeded for {label}")
+    raise RuntimeError(f"OpenAI embed retries exceeded for {label}")
 
 
 def embed_documents(texts: List[str]) -> List[List[float]]:
-    return _cohere_embed_with_retry(
+    return _openai_embed_with_retry(
         texts=texts,
-        input_type="search_document",
         label=f"documents batch (size={len(texts)})",
     )
 
 
 def embed_query(text: str) -> List[float]:
-    embeddings = _cohere_embed_with_retry(
+    embeddings = _openai_embed_with_retry(
         texts=[text],
-        input_type="search_query",
         label="user query",
     )
     return embeddings[0]
 
 
 # ==========================
-# LOAD CSV + INDEX (Cohere -> Chroma)
+# LOAD CSV + INDEX (OpenAI -> Chroma)
 # ==========================
 DATA_DIR = "data"
 END_CUSTOMER_FILE = os.path.join(DATA_DIR, "end_customer.csv")
@@ -292,10 +279,10 @@ def load_and_index_one(path: str, collection, tag: str):
             time.sleep(EMBED_BATCH_SLEEP_SECONDS)
 
         print(
-            f"[INDEX] Finished indexing {total_docs} rows for {tag} using Cohere embeddings."
+            f"[INDEX] Finished indexing {total_docs} rows for {tag} using OpenAI embeddings."
         )
     except Exception as e:
-        print(f"[WARN] Failed to embed/index dataset {tag} with Cohere: {e}")
+        print(f"[WARN] Failed to embed/index dataset {tag} with OpenAI: {e}")
         print("[WARN] Starting server without this vector index; chat may fallback.")
 
 
@@ -342,12 +329,13 @@ def auto_normalize_sb(text: str) -> str:
 
 
 # ==========================
-# GROQ GENERATION (Llama 3.3) with prefix rule
+# OpenAI GENERATION (chat) with prefix rule (modern client)
 # ==========================
-GROQ_MODEL_ID = "llama-3.3-70b-versatile"
+GROQ_MODEL_ID = "llama-3.3-70b-versatile"  # kept for reference if needed
+CHAT_MODEL_ID = "gpt-3.5-turbo-16k"
 
 
-def generate_with_groq(context: str, user_question: str) -> Optional[str]:
+def generate_with_openai(context: str, user_question: str) -> Optional[str]:
     # keep your system prompt exactly as before (omitted here for brevity)
     prefix_rule = (
         "IMPORTANT – ANSWERING GUIDELINES (apply these before any other instruction):\n"
@@ -361,6 +349,10 @@ def generate_with_groq(context: str, user_question: str) -> Optional[str]:
         "- Keep responses concise, human-friendly, and start direct answers with a short lead like: 'Here is the price for Hyundai R30' when answering price queries.\n"
         "- Do not reveal internal normalizations or synonyms. If user typed SB*, simply answer referencing VJ* (without explaining the mapping).\n"
         "- Avoid extra filler lines. Answer to the point.\n\n"
+        # NEW RULES ADDED PER REQUEST:
+        "- If the user asks ONLY for a BROCHURE (for example: 'give me brochure for vj30' or 'brochure vj30'), keep the assistant reply minimal (a single-line acknowledgement\n"
+        "  referencing the model is acceptable). Do NOT attempt to embed, preview, or describe the PDF. The backend will attach brochure_urls when available so the frontend\n"
+        "  can provide buttons that open the brochures in new tabs.\n\n"
     )
 
     system_prompt = (
@@ -370,11 +362,47 @@ def generate_with_groq(context: str, user_question: str) -> Optional[str]:
         "GENERAL RULES:\n"
         "- You MUST use ONLY the facts from the CONTEXT.\n"
         "- If the answer is not clearly present in the CONTEXT, reply EXACTLY: UNSURE_FROM_DATA.\n"
-        "- Do NOT guess. Do NOT use outside knowledge.\n"
-        "- Keep answers concise, factual, and formatted cleanly.\n"
+        "- Do NOT guess. Do NOT use outside knowledge.\n        "
+        "- Answer clearly, professionally, and in a structured way for the end customer.\n"
         "- Respect the dataset tags [END_CUSTOMER], [SPARE_PARTS], [DEALERS] when reasoning.\n"
         "\n"
-        "... (rest of original system prompt kept unchanged) ..."
+        "FOR COMPATIBILITY QUESTIONS (e.g., 'which breaker is compatible with SANY SY20', "
+        "'which all breakers work with Hyundai R30', 'show options for X machine'):\n"
+        "- Scan ALL lines in the CONTEXT.\n"
+        "- Identify EVERY row where the machine brand and/or machine model match the user question.\n"
+        "- Collect all DISTINCT compatible breaker models / SKUs from those rows.\n"
+        "- Return them as a BULLET LIST, one breaker per line.\n"
+        "- For each breaker, include key details if present: breaker model name, SKU, chisel diameter, "
+        "impact energy, and any important notes (like price or stock).\n"
+        "- Do NOT arbitrarily pick only one breaker if multiple are present; always show all relevant options.\n"
+        "\n"
+        "FOR COMPARISON QUESTIONS (e.g., 'Compare JCB and CAT', 'Compare breaker A vs breaker B'):\n"
+        "- Start your answer with: 'Sure, here is a comparison between ... and ...:'\n"
+        "- Build a clean Markdown table using this format:\n"
+        "  | Feature | Option 1 | Option 2 |\n"
+        "  |--------|----------|----------|\n"
+        "  | ...    | ...      | ...      |\n"
+        "- Choose meaningful features from the CONTEXT such as machine model, breaker model, "
+        "impact energy, chisel diameter, price, stock, etc.\n"
+        "- Only include facts that are clearly present in the CONTEXT.\n"
+        "\n"
+        "FOR SPECIFIC PARAMETER QUESTIONS (e.g., 'What is the chisel diameter for Hyundai R30?', "
+        "'What is the impact energy in joules for model VJ20 HD?'):\n"
+        "- Find the row(s) that match the machine/breaker mentioned.\n"
+        "- Extract the exact requested numeric or textual value from those row(s).\n"
+        "- If multiple rows give different values, mention each distinct value clearly.\n"
+        "\n"
+        "FOR SUBJECTIVE/BEST-OPTION QUESTIONS (e.g., 'Which is the best model for X?', "
+        "'Which breaker is more suitable for Y machine?'):\n"
+        "- First, list all relevant options as a bullet list with their key specs.\n"
+        "- Then, based ONLY on the CONTEXT (features such as impact energy, recommended tonnage, "
+        "application type, or any hints in the data), choose ONE option as the best.\n"
+        "- Clearly say: 'According to the available data, the best option is <NAME> because ...'\n"
+        "- Do NOT invent reasons that are not supported by the CONTEXT.\n"
+        "\n"
+        "REMEMBER:\n"
+        "- Never invent breakers, dealers, or spare parts that are not present in the CONTEXT.\n"
+        "- If the machine, breaker, part, or dealer mentioned is not present at all, reply UNSURE_FROM_DATA.\n"
     )
 
     full_system_prompt = prefix_rule + system_prompt
@@ -388,18 +416,19 @@ USER QUESTION:
 """
 
     try:
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL_ID,
+        resp = client.chat.completions.create(
+            model=CHAT_MODEL_ID,
             messages=[
                 {"role": "system", "content": full_system_prompt},
                 {"role": "user", "content": user_content},
             ],
             temperature=0.0,
+            max_tokens=2000,
         )
         answer = resp.choices[0].message.content
         return answer
     except Exception as e:
-        print(f"[GROQ ERROR] {e}")
+        print(f"[OPENAI ERROR] {e}")
         return None
 
 
@@ -411,6 +440,24 @@ def health():
     return {"status": "ok"}
 
 
+def _extract_vj_tokens(text: str) -> List[str]:
+    """
+    Find all VJ tokens like VJ20, VJ30, VJ43HD etc.
+    Returns normalized keys e.g. vj20, vj43hd (lowercase, alphanumeric only)
+    """
+    tokens = []
+    if not text:
+        return tokens
+    for m in re.finditer(r"\b(vj)[\s\-]*?(\d{1,3})(?:\s*(hd))?\b", text, re.IGNORECASE):
+        parts = [m.group(1) or "", m.group(2) or ""]
+        if m.group(3):
+            parts.append(m.group(3))
+        key_raw = "".join(parts)
+        key_norm = re.sub(r"[^a-z0-9]", "", key_raw.lower())
+        tokens.append(key_norm)
+    return tokens
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, request: Request):
     if not req.messages:
@@ -419,15 +466,16 @@ def chat(req: ChatRequest, request: Request):
     user_msg = req.messages[-1].content
     normalized_user_msg = auto_normalize_sb(user_msg)
 
-    # embed query, query chroma, call groq, same as before...
+    # embed query, query chroma, call openai chat, same as before...
     try:
         query_vec = embed_query(normalized_user_msg)
     except Exception as e:
-        print(f"[ERROR] Failed to embed user query with Cohere: {e}")
+        print(f"[ERROR] Failed to embed user query with OpenAI: {e}")
         return ChatResponse(
             answer=fallback(),
             used_context=[],
             from_fallback=True,
+            brochure_urls=None,
         )
 
     docs: List[str] = []
@@ -452,17 +500,19 @@ def chat(req: ChatRequest, request: Request):
             answer=fallback(),
             used_context=[],
             from_fallback=True,
+            brochure_urls=None,
         )
 
     unique_docs = list(dict.fromkeys(docs))
     context = "\n\n---\n\n".join(unique_docs)
 
-    raw = generate_with_groq(context=context, user_question=normalized_user_msg)
+    raw = generate_with_openai(context=context, user_question=normalized_user_msg)
     if raw is None:
         return ChatResponse(
             answer=fallback(),
             used_context=unique_docs,
             from_fallback=True,
+            brochure_urls=None,
         )
 
     raw = raw.strip()
@@ -471,40 +521,37 @@ def chat(req: ChatRequest, request: Request):
             answer=fallback(),
             used_context=unique_docs,
             from_fallback=True,
+            brochure_urls=None,
         )
 
-    # Try to attach brochure view URL if model found
-    brochure_url = None
-    m = re.search(r"\b(vj)[\s\-]*?(\d{1,3})(?:\s*(hd))?\b", normalized_user_msg, re.IGNORECASE)
-    if m:
-        parts = [m.group(1) or "", m.group(2) or ""]
-        if m.group(3):
-            parts.append(m.group(3))
-        key_raw = "".join(parts)
-        key_norm = re.sub(r"[^a-z0-9]", "", key_raw.lower())
-        fname = BROCHURE_MAP.get(key_norm)
-        if not fname:
-            # try without HD suffix
-            alt_key = re.sub(r"hd$", "", key_norm)
-            fname = BROCHURE_MAP.get(alt_key)
-        if fname:
-            base = str(request.base_url).rstrip("/")
-            brochure_url = f"{base}/brochures/view/{fname}"
+    # Collect all VJ tokens found in user message AND in the model's raw output
+    found_keys = set()
+    user_tokens = _extract_vj_tokens(normalized_user_msg)
+    for k in user_tokens:
+        found_keys.add(k)
 
-    # Also check raw Groq answer for VJ tokens
-    if not brochure_url:
-        m2 = re.search(r"\b(vj)[\s\-]*?(\d{1,3})(?:\s*(hd))?\b", raw, re.IGNORECASE)
-        if m2:
-            key_raw = "".join([m2.group(1) or "", m2.group(2) or ""] + ([m2.group(3)] if m2.group(3) else []))
-            key_norm = re.sub(r"[^a-z0-9]", "", key_raw.lower())
-            fname = BROCHURE_MAP.get(key_norm)
-            if fname:
-                base = str(request.base_url).rstrip("/")
-                brochure_url = f"{base}/brochures/view/{fname}"
+    answer_tokens = _extract_vj_tokens(raw)
+    for k in answer_tokens:
+        found_keys.add(k)
+
+    brochure_urls: List[str] = []
+    base = str(request.base_url).rstrip("/")
+
+    for key in found_keys:
+        fname = BROCHURE_MAP.get(key)
+        if not fname:
+            # try removing hd suffix if present in key
+            alt = re.sub(r"hd$", "", key)
+            fname = BROCHURE_MAP.get(alt)
+        if fname:
+            brochure_urls.append(f"{base}/brochures/view/{fname}")
+
+    # dedupe while preserving order
+    brochure_urls = list(dict.fromkeys(brochure_urls))
 
     return ChatResponse(
         answer=raw,
         used_context=unique_docs,
         from_fallback=False,
-        brochure_url=brochure_url,
+        brochure_urls=brochure_urls if brochure_urls else None,
     )
